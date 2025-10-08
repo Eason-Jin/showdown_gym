@@ -126,6 +126,43 @@ class ShowdownEnvironment(BaseShowdownEnv):
         reward += np.sum(diff_health_opponent)
 
         return reward
+    
+    def expected_damage(self, atk, defn, move, battle=None):
+        def _stat_est(mon, stat):
+            b = mon.boosts.get(stat, 0)
+            boost_mult = (2 + b) / 2 if b >= 0 else 2 / (2 - b)
+            return (2 * mon.base_stats.get(stat, 1) + 31) * boost_mult
+        
+        def terrain_multiplier(move_type, battle: AbstractBattle):
+            terrain = getattr(battle, "fields", None)
+            if not terrain:
+                return 1.0
+            terrain = str(terrain).lower()
+            if "electricterrain" in terrain and str(move_type).lower() == "electric":
+                return 1.3
+            if "grassyterrain" in terrain and str(move_type).lower() == "grass":
+                return 1.3
+            if "psychicterrain" in terrain and str(move_type).lower() == "psychic":
+                return 1.3
+            return 1.0
+        
+        if not atk or not defn or not move:
+            return 0.0
+        move_type = getattr(move, "type", None)
+        eff = defn.damage_multiplier(move_type) if move_type else 1.0
+        if eff <= 0:
+            return 0.0
+        stab = 1.5 if (move_type and move_type in atk.types) else 1.0
+        acc = getattr(move, "accuracy", 1.0) or 1.0
+        cat = getattr(move, "category", "special")
+        if "physical" in str(cat).lower():
+            ratio = _stat_est(atk, "atk") / max(_stat_est(defn, "def"), 1)
+        else:
+            ratio = _stat_est(atk, "spa") / max(_stat_est(defn, "spd"), 1)
+
+        raw = (getattr(move, "base_power", 0) or 0) * stab * eff * acc * ratio
+        raw *= terrain_multiplier(move_type, battle)
+        return min(100.0, raw * 0.2)
 
     def _observation_size(self) -> int:
         """
@@ -140,7 +177,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 12
+        return 16
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -157,6 +194,15 @@ class ShowdownEnvironment(BaseShowdownEnv):
             np.float32: A 1D numpy array containing the state you want the agent to observe.
         """
 
+        me, opp = battle.active_pokemon, battle.opponent_active_pokemon
+        move_damages = []
+        for mv in battle.available_moves:
+            dmg = self.expected_damage(me, opp, mv, battle)
+            move_damages.append(dmg)
+
+        while len(move_damages) < 4:
+            move_damages.append(0.0)
+        
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
             mon.current_hp_fraction for mon in battle.opponent_team.values()
@@ -173,6 +219,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
         # Final vector - single array with health of both teams
         final_vector = np.concatenate(
             [
+                move_damages,  # 4 components for the expected damage of each move
                 health_team,  # N components for the health of each pokemon
                 health_opponent,  # N components for the health of opponent pokemon
             ]
