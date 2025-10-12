@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 from poke_env import (
@@ -12,9 +12,15 @@ from poke_env import (
 from poke_env.battle import AbstractBattle
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.environment.singles_env import ObsType
-from poke_env.player.player import Player
-
+from poke_env.battle.pokemon import Pokemon
+from poke_env.battle.status import Status
 from showdown_gym.base_environment import BaseShowdownEnv
+from poke_env.battle import PokemonType
+from poke_env.battle.move import Move
+from poke_env.battle.weather import Weather
+from poke_env.battle.move_category import MoveCategory
+from poke_env.player.player import Player
+from poke_env.battle.side_condition import SideCondition
 
 
 class ShowdownEnvironment(BaseShowdownEnv):
@@ -43,7 +49,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         This should return the number of actions you wish to use if not using the default action scheme.
         """
-        return None  # Return None if action size is default
+        return 10  # Return None if action size is default
 
     def process_action(self, action: np.int64) -> np.int64:
         """
@@ -65,6 +71,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
         :return: The battle order ID for the given action in context of the current battle.
         :rtype: np.Int64
         """
+        # Not considering Tera for now
         return action
 
     def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
@@ -95,74 +102,152 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         prior_battle = self._get_prior_battle(battle)
 
-        reward = 0.0
+        if battle.finished:
+            if battle.won == "me":
+                return 100.0
+            else:
+                return -100.0
 
-        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        health_opponent = [
-            mon.current_hp_fraction for mon in battle.opponent_team.values()
-        ]
+        score = 0.0
+        # HP
+        score += sum(mon.current_hp_fraction for mon in battle.my_team.pokemons)
+        score -= sum(mon.current_hp_fraction for mon in battle.opponent_team.pokemons)
+        # Status
+        score += 0.1 * \
+            sum(1 for mon in battle.my_team.pokemons if mon.status is not None and not mon.fainted)
+        score -= 0.1 * \
+            sum(1 for mon in battle.opponent_team.pokemons if mon.status is not None and not mon.fainted)
+        # Boosts
+        score += 0.05 * sum(sum(boost for boost in mon.boosts.values()
+                            if boost > 0) for mon in battle.my_team.pokemons)
+        score -= 0.05 * sum(sum(-boost for boost in mon.boosts.values() if boost < 0)
+                            for mon in battle.opponent_team.pokemons)
+        # Type advantage
+        if battle.my_team.active and battle.opponent_team.active:
+            score += self.combat_effectiveness(
+                battle.my_team.active, battle.opponent_team.active)
+        # Hazards
+        score += 0.1 * len(battle.opponent_side_conditions)
+        score -= 0.1 * len(battle.side_conditions)
+        # Remaining Pokémon
+        score += 0.5 * sum(not mon.fainted for mon in battle.my_team.pokemons)
+        score -= 0.5 * \
+            sum(not mon.fainted for mon in battle.opponent_team.pokemons)
 
-        # If the opponent has less than 6 Pokémon, fill the missing values with 1.0 (fraction of health)
-        if len(health_opponent) < len(health_team):
-            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
+        # Super effective move bonus
+        if battle.my_team.active and battle.opponent_team.active:
+            best_effectiveness = 1.0
+            for move in battle.available_moves:
+                eff = battle.opponent_team.active.damage_multiplier(move)
+                if eff > best_effectiveness:
+                    best_effectiveness = eff
+            # Reward for having a super effective move available
+            if best_effectiveness > 1.0:
+                score += 0.3 * (best_effectiveness - 1.0)
 
-        prior_health_opponent = []
-        if prior_battle is not None:
-            prior_health_opponent = [
-                mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
-            ]
+        return score
 
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
-        if len(prior_health_opponent) < len(health_team):
-            prior_health_opponent.extend(
-                [1.0] * (len(health_team) - len(prior_health_opponent))
-            )
+    def _combat_effectiveness(self, active: Pokemon, opponent: Pokemon):
+        score = 0
+        score += max([opponent.damage_multiplier(t)
+                      for t in active.types if t is not None])
+        score -= max([active.damage_multiplier(t)
+                      for t in opponent.types if t is not None])
 
-        diff_health_opponent = np.array(prior_health_opponent) - np.array(
-            health_opponent
-        )
+        if active.base_stats["spe"] > opponent.base_stats["spe"]:
+            score += 0.1
+        elif active.base_stats["spe"] < opponent.base_stats["spe"]:
+            score -= 0.1
 
-        # Reward for reducing the opponent's health
-        reward += np.sum(diff_health_opponent)
+        score += active.current_hp_fraction * 0.4
+        score -= opponent.current_hp_fraction * 0.4
 
-        return reward
-    
-    def expected_damage(self, atk, defn, move, battle=None):
-        def _stat_est(mon, stat):
-            b = mon.boosts.get(stat, 0)
-            boost_mult = (2 + b) / 2 if b >= 0 else 2 / (2 - b)
-            return (2 * mon.base_stats.get(stat, 1) + 31) * boost_mult
-        
-        def terrain_multiplier(move_type, battle: AbstractBattle):
-            terrain = getattr(battle, "fields", None)
-            if not terrain:
-                return 1.0
-            terrain = str(terrain).lower()
-            if "electricterrain" in terrain and str(move_type).lower() == "electric":
-                return 1.3
-            if "grassyterrain" in terrain and str(move_type).lower() == "grass":
-                return 1.3
-            if "psychicterrain" in terrain and str(move_type).lower() == "psychic":
-                return 1.3
-            return 1.0
-        
-        if not atk or not defn or not move:
-            return 0.0
-        move_type = getattr(move, "type", None)
-        eff = defn.damage_multiplier(move_type) if move_type else 1.0
-        if eff <= 0:
-            return 0.0
-        stab = 1.5 if (move_type and move_type in atk.types) else 1.0
-        acc = getattr(move, "accuracy", 1.0) or 1.0
-        cat = getattr(move, "category", "special")
-        if "physical" in str(cat).lower():
-            ratio = _stat_est(atk, "atk") / max(_stat_est(defn, "def"), 1)
+        return score
+
+    def _encode_status(self, status: Status) -> int:
+        return status.value if status is not None else 0
+
+    def _encode_weather(self, weather: Dict[Weather, int], types: List[PokemonType]) -> int:
+        if not weather:
+            return 0
+        weather_type = max(weather, key=weather.get)
+        duration = weather[weather_type]
+        base_code = weather_type.value * 10 + duration
+        # If weather boosts a type the pokemon has, return a higher value
+        if (weather_type == Weather.RAINDANCE and PokemonType.WATER in types) \
+                or (weather_type == Weather.SUNNYDAY and PokemonType.FIRE in types) \
+                or (weather_type == Weather.SANDSTORM and PokemonType.ROCK in types) \
+                or (weather_type == Weather.HAIL and PokemonType.ICE in types):
+            return base_code + 100
+        return base_code
+
+    def _encode_side_conditions(self, side_conditions: Dict[SideCondition, int], types: List[PokemonType]) -> int:
+        if not side_conditions:
+            return 0
+        side_condition_type = max(side_conditions, key=side_conditions.get)
+        duration = side_conditions[side_condition_type]
+        base_code = side_condition_type.value * 10 + duration
+        # If side condition affects the pokemon negatively, return a lower value
+        if (side_condition_type == SideCondition.STEALTH_ROCK and
+                any(t in [PokemonType.FIRE, PokemonType.ICE, PokemonType.FLYING, PokemonType.BUG] for t in types)) \
+            or (side_condition_type == SideCondition.TOXIC_SPIKES and
+                PokemonType.POISON not in types and PokemonType.STEEL not in types):
+            return base_code - 100
+        return base_code
+
+    def _calc_stat(self, battle: AbstractBattle, mon: Pokemon, stat: str):
+        boost = 1.0
+        if mon.boosts[stat] > 1:
+            boost = (2 + mon.boosts[stat]) / 2
         else:
-            ratio = _stat_est(atk, "spa") / max(_stat_est(defn, "spd"), 1)
+            boost = 2 / (2 - mon.boosts[stat])
+        base = ((2 * mon.base_stats[stat] + 31) + 5) * boost
 
-        raw = (getattr(move, "base_power", 0) or 0) * stab * eff * acc * ratio
-        raw *= terrain_multiplier(move_type, battle)
-        return min(100.0, raw * 0.2)
+        # Weather-based stat boosts
+        if battle.weather:
+            # Sandstorm: Rock-type Sp. Def boost
+            if stat == "spd" and Weather.SANDSTORM in battle.weather and battle.weather[Weather.SANDSTORM] > 0:
+                if PokemonType.ROCK in mon.types:
+                    base *= 1.5
+            # Snow: Ice-type Def boost
+            if stat == "def" and (
+                (Weather.SNOW in battle.weather and battle.weather[Weather.SNOW] > 0)
+                # If you want to support Hail as well
+                or (Weather.HAIL in battle.weather and battle.weather[Weather.HAIL] > 0)
+            ):
+                if PokemonType.ICE in mon.types:
+                    base *= 1.5
+
+        return base
+
+    def _estimate_damage(self, battle: AbstractBattle, move: Move, attacker: Pokemon, defender: Pokemon, max_accuracy: bool = False) -> float:
+        physical_ratio = self._calc_stat(battle, attacker, "atk") / \
+            self._calc_stat(battle, defender, "def")
+        special_ratio = self._calc_stat(battle, attacker, "spa") / \
+            self._calc_stat(battle, defender, "spd")
+
+        if max_accuracy:
+            accuracy = 1.0
+        else:
+            accuracy = move.accuracy
+
+        base_power = move.base_power
+
+        if battle.weather:
+            if Weather.RAINDANCE in battle.weather and battle.weather[Weather.RAINDANCE] > 0:
+                if move.type == PokemonType.WATER:
+                    base_power *= 1.5
+                elif move.type == PokemonType.FIRE:
+                    base_power *= 0.5
+            elif Weather.SUNNYDAY in battle.weather and battle.weather[Weather.SUNNYDAY] > 0:
+                if move.type == PokemonType.FIRE:
+                    base_power *= 1.5
+                elif move.type == PokemonType.WATER:
+                    base_power *= 0.5
+
+        estimated_damage = base_power * (1.5 if move.type in attacker.types else 1) * (physical_ratio if move.category ==
+                                                                                       MoveCategory.PHYSICAL else special_ratio) * accuracy * move.expected_hits * defender.damage_multiplier(move)
+        return estimated_damage
 
     def _observation_size(self) -> int:
         """
@@ -177,7 +262,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 16
+        return 23
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -194,15 +279,23 @@ class ShowdownEnvironment(BaseShowdownEnv):
             np.float32: A 1D numpy array containing the state you want the agent to observe.
         """
 
-        me, opp = battle.active_pokemon, battle.opponent_active_pokemon
-        move_damages = []
-        for mv in battle.available_moves:
-            dmg = self.expected_damage(me, opp, mv, battle)
-            move_damages.append(dmg)
+        active: Pokemon = battle.active_pokemon
+        opponent: Pokemon = battle.opponent_active_pokemon
+        combat_effectiveness = self._combat_effectiveness(active, opponent)
+        my_hp_frac = active.current_hp_fraction
+        my_status = self._encode_status(active.status)
+        opp_hp_frac = opponent.current_hp_fraction
+        opp_status = self._encode_status(opponent.status)
 
+        move_damages = [self._estimate_damage(
+            battle, m, active, opponent, max_accuracy=False) for m in battle.available_moves]
         while len(move_damages) < 4:
             move_damages.append(0.0)
-        
+
+        weather = self._encode_weather(battle.weather)
+
+        side_conditions = self._encode_side_conditions(battle.side_conditions)
+
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
             mon.current_hp_fraction for mon in battle.opponent_team.values()
@@ -210,7 +303,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
         if len(health_opponent) < len(health_team):
-            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
+            health_opponent.extend(
+                [1.0] * (len(health_team) - len(health_opponent)))
 
         #########################################################################################################
         # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
@@ -219,9 +313,16 @@ class ShowdownEnvironment(BaseShowdownEnv):
         # Final vector - single array with health of both teams
         final_vector = np.concatenate(
             [
+                [combat_effectiveness],  # 1 component for combat effectiveness
+                [my_hp_frac],  # 1 component for the health fraction of the active pokemon
+                [my_status],  # 1 component for the status of the active pokemon
+                [opp_hp_frac],  # 1 component for the health fraction of the opponent active pokemon
+                [opp_status],  # 1 component for the status of the opponent active pokemon
                 move_damages,  # 4 components for the expected damage of each move
-                health_team,  # N components for the health of each pokemon
-                health_opponent,  # N components for the health of opponent pokemon
+                [weather],  # 1 component for the weather
+                [side_conditions],  # 1 component for the side conditions
+                health_team,  # 6 components for the health of each pokemon
+                health_opponent,  # 6 components for the health of opponent pokemon
             ]
         )
 
@@ -270,9 +371,11 @@ class SingleShowdownWrapper(SingleAgentWrapper):
                 account_configuration=opponent_configuration
             )
         elif opponent_type == "max":
-            opponent = MaxBasePowerPlayer(account_configuration=opponent_configuration)
+            opponent = MaxBasePowerPlayer(
+                account_configuration=opponent_configuration)
         elif opponent_type == "random":
-            opponent = RandomPlayer(account_configuration=opponent_configuration)
+            opponent = RandomPlayer(
+                account_configuration=opponent_configuration)
         else:
             raise ValueError(f"Unknown opponent type: {opponent_type}")
 
