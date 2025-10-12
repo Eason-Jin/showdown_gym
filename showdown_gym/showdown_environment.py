@@ -292,9 +292,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
         while len(move_damages) < 4:
             move_damages.append(0.0)
 
-        weather = self._encode_weather(battle.weather)
+        weather = self._encode_weather(battle.weather, active.types)
 
-        side_conditions = self._encode_side_conditions(battle.side_conditions)
+        side_conditions = self._encode_side_conditions(battle.side_conditions, active.types)
 
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
