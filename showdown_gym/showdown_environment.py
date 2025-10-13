@@ -101,6 +101,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
         """
 
         prior_battle = self._get_prior_battle(battle)
+        active = battle.active_pokemon
+        opponent = battle.opponent_active_pokemon
 
         if battle.finished:
             if battle.won == "me":
@@ -110,35 +112,35 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         score = 0.0
         # HP
-        score += sum(mon.current_hp_fraction for mon in battle.my_team.pokemons)
-        score -= sum(mon.current_hp_fraction for mon in battle.opponent_team.pokemons)
+        score += sum(mon.current_hp_fraction for mon in battle.team.values())
+        score -= sum(mon.current_hp_fraction for mon in battle.opponent_team.values())
         # Status
         score += 0.1 * \
-            sum(1 for mon in battle.my_team.pokemons if mon.status is not None and not mon.fainted)
+            sum(1 for mon in battle.team.values() if mon.status is not None and not mon.fainted)
         score -= 0.1 * \
-            sum(1 for mon in battle.opponent_team.pokemons if mon.status is not None and not mon.fainted)
+            sum(1 for mon in battle.opponent_team.values() if mon.status is not None and not mon.fainted)
         # Boosts
         score += 0.05 * sum(sum(boost for boost in mon.boosts.values()
-                            if boost > 0) for mon in battle.my_team.pokemons)
+                            if boost > 0) for mon in battle.team.values())
         score -= 0.05 * sum(sum(-boost for boost in mon.boosts.values() if boost < 0)
-                            for mon in battle.opponent_team.pokemons)
+                            for mon in battle.opponent_team.values())
         # Type advantage
-        if battle.my_team.active and battle.opponent_team.active:
+        if active and opponent:
             score += self.combat_effectiveness(
-                battle.my_team.active, battle.opponent_team.active)
+                active, opponent)
         # Hazards
         score += 0.1 * len(battle.opponent_side_conditions)
         score -= 0.1 * len(battle.side_conditions)
         # Remaining Pokémon
-        score += 0.5 * sum(not mon.fainted for mon in battle.my_team.pokemons)
+        score += 0.5 * sum(not mon.fainted for mon in battle.team.values())
         score -= 0.5 * \
-            sum(not mon.fainted for mon in battle.opponent_team.pokemons)
+            sum(not mon.fainted for mon in battle.opponent_team.values())
 
         # Super effective move bonus
-        if battle.my_team.active and battle.opponent_team.active:
+        if active and opponent :
             best_effectiveness = 1.0
             for move in battle.available_moves:
-                eff = battle.opponent_team.active.damage_multiplier(move)
+                eff = opponent.damage_multiplier(move)
                 if eff > best_effectiveness:
                     best_effectiveness = eff
             # Reward for having a super effective move available
