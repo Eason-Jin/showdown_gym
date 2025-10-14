@@ -126,7 +126,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
                             for mon in battle.opponent_team.values())
         # Type advantage
         if active and opponent:
-            score += self.combat_effectiveness(
+            score += self._combat_effectiveness(
                 active, opponent)
         # Hazards
         score += 0.1 * len(battle.opponent_side_conditions)
