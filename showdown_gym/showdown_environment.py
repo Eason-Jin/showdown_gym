@@ -16,11 +16,12 @@ from poke_env.battle.pokemon import Pokemon
 from poke_env.battle.status import Status
 from showdown_gym.base_environment import BaseShowdownEnv
 from poke_env.battle import PokemonType
-from poke_env.battle.move import Move
+from poke_env.battle.move import Move, DynamaxMove
 from poke_env.battle.weather import Weather
 from poke_env.battle.move_category import MoveCategory
 from poke_env.player.player import Player
 from poke_env.battle.side_condition import SideCondition
+from poke_env.player.battle_order import BattleOrder
 
 
 class ShowdownEnvironment(BaseShowdownEnv):
@@ -40,6 +41,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
         )
 
         self.rl_agent = account_name_one
+        self.expert_player = SimpleHeuristicsPlayer(team=team)
 
     def _get_action_size(self) -> int | None:
         """
@@ -100,54 +102,37 @@ class ShowdownEnvironment(BaseShowdownEnv):
             float: The calculated reward based on the change in state of the battle.
         """
 
-        prior_battle = self._get_prior_battle(battle)
-        active = battle.active_pokemon
-        opponent = battle.opponent_active_pokemon
+        expert_action: BattleOrder = self.expert_player.choose_move(battle)
 
-        if battle.finished:
-            if battle.won == "me":
-                return 100.0
+        if isinstance(expert_action.order, Pokemon):
+            expert_action_id = 0
+            for i, mon in enumerate(battle.team.values()):
+                if mon == expert_action.order:
+                    expert_action_id = i
+                    break
+        elif isinstance(expert_action.order, Move):
+            if isinstance(expert_action.order, DynamaxMove):
+                expert_action_id = 9
             else:
-                return -100.0
+                expert_action_id = 6
+            for i, move in enumerate(battle.available_moves):
+                if move == expert_action.order:
+                    expert_action_id += i
+                    # Convert Dynamax back to normal move index
+                    if expert_action_id > 9:
+                        expert_action_id -= 3
+                    break
+        else:
+            expert_action_id = -1
 
-        score = 0.0
-        # HP
-        score += sum(mon.current_hp_fraction for mon in battle.team.values())
-        score -= sum(mon.current_hp_fraction for mon in battle.opponent_team.values())
-        # Status
-        score += 0.1 * \
-            sum(1 for mon in battle.team.values() if mon.status is not None and not mon.fainted)
-        score -= 0.1 * \
-            sum(1 for mon in battle.opponent_team.values() if mon.status is not None and not mon.fainted)
-        # Boosts
-        score += 0.05 * sum(sum(boost for boost in mon.boosts.values()
-                            if boost > 0) for mon in battle.team.values())
-        score -= 0.05 * sum(sum(-boost for boost in mon.boosts.values() if boost < 0)
-                            for mon in battle.opponent_team.values())
-        # Type advantage
-        if active and opponent:
-            score += self._combat_effectiveness(
-                active, opponent)
-        # Hazards
-        score += 0.1 * len(battle.opponent_side_conditions)
-        score -= 0.1 * len(battle.side_conditions)
-        # Remaining Pokémon
-        score += 0.5 * sum(not mon.fainted for mon in battle.team.values())
-        score -= 0.5 * \
-            sum(not mon.fainted for mon in battle.opponent_team.values())
+        reward = 0.0
+        if 0 <= expert_action_id <= 5 and 0 <= self.last_action <= 5:
+            reward += 6
+        elif 6 <= expert_action_id <= 9 and 6 <= self.last_action <= 9:
+            reward += 4
+        reward -= abs(expert_action_id - self.last_action)
 
-        # Super effective move bonus
-        if active and opponent :
-            best_effectiveness = 1.0
-            for move in battle.available_moves:
-                eff = opponent.damage_multiplier(move)
-                if eff > best_effectiveness:
-                    best_effectiveness = eff
-            # Reward for having a super effective move available
-            if best_effectiveness > 1.0:
-                score += 0.3 * (best_effectiveness - 1.0)
-
-        return score
+        return reward
 
     def _combat_effectiveness(self, active: Pokemon, opponent: Pokemon):
         score = 0
@@ -296,7 +281,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         weather = self._encode_weather(battle.weather, active.types)
 
-        side_conditions = self._encode_side_conditions(battle.side_conditions, active.types)
+        side_conditions = self._encode_side_conditions(
+            battle.side_conditions, active.types)
 
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
@@ -316,10 +302,13 @@ class ShowdownEnvironment(BaseShowdownEnv):
         final_vector = np.concatenate(
             [
                 [combat_effectiveness],  # 1 component for combat effectiveness
-                [my_hp_frac],  # 1 component for the health fraction of the active pokemon
+                # 1 component for the health fraction of the active pokemon
+                [my_hp_frac],
                 [my_status],  # 1 component for the status of the active pokemon
-                [opp_hp_frac],  # 1 component for the health fraction of the opponent active pokemon
-                [opp_status],  # 1 component for the status of the opponent active pokemon
+                # 1 component for the health fraction of the opponent active pokemon
+                [opp_hp_frac],
+                # 1 component for the status of the opponent active pokemon
+                [opp_status],
                 move_damages,  # 4 components for the expected damage of each move
                 [weather],  # 1 component for the weather
                 [side_conditions],  # 1 component for the side conditions
