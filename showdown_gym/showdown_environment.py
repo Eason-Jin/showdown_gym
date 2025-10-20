@@ -49,7 +49,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         This should return the number of actions you wish to use if not using the default action scheme.
         """
-        return 10  # Return None if action size is default
+        return 5 + 4 + 4  # Return None if action size is default
 
     def process_action(self, action: np.int64) -> np.int64:
         """
@@ -71,8 +71,18 @@ class ShowdownEnvironment(BaseShowdownEnv):
         :return: The battle order ID for the given action in context of the current battle.
         :rtype: np.Int64
         """
-        # Not considering Tera for now
-        return action
+        if 0 <= action <= 4:
+            # Switches [0, 4] map to [0, 4]
+            return action
+        elif 5 <= action <= 8:
+            # Moves [5, 8] map to [6, 9]
+            return action + 1
+        elif 9 <= action <= 12:
+            # Tera evolve moves [9, 12] map to [22, 25]
+            return action + 13
+        else:
+            # Fail safe
+            return action
 
     def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
         info = super().get_additional_info()
@@ -306,6 +316,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         side_conditions = self._encode_side_conditions(battle.side_conditions, active.types)
 
+        can_tera = 1.0 if battle.can_tera else 0.0
+
         #########################################################################################################
         # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
         #########################################################################################################
@@ -322,6 +334,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 switches_info,  # 10 components for the switches info
                 [weather],  # 1 component for the weather
                 [side_conditions],  # 1 component for the side conditions
+                [can_tera],  # 1 component for whether can tera
             ]
         )
 
