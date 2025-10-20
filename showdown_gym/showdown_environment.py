@@ -13,6 +13,7 @@ from poke_env.battle import AbstractBattle
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.environment.singles_env import ObsType
 from poke_env.player.player import Player
+from poke_env.data import GenData
 
 from showdown_gym.base_environment import BaseShowdownEnv
 
@@ -43,7 +44,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         This should return the number of actions you wish to use if not using the default action scheme.
         """
-        return None  # Return None if action size is default
+        return 9  # Return None if action size is default
 
     def process_action(self, action: np.int64) -> np.int64:
         """
@@ -65,7 +66,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
         :return: The battle order ID for the given action in context of the current battle.
         :rtype: np.Int64
         """
-        return action
+        if 5 <= action <= 8:
+            return action + 1
+        else:
+            return action
 
     def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
         info = super().get_additional_info()
@@ -92,40 +96,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
         Returns:
             float: The calculated reward based on the change in state of the battle.
         """
-
-        prior_battle = self._get_prior_battle(battle)
-
-        reward = 0.0
-
-        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        health_opponent = [
-            mon.current_hp_fraction for mon in battle.opponent_team.values()
-        ]
-
-        # If the opponent has less than 6 Pokémon, fill the missing values with 1.0 (fraction of health)
-        if len(health_opponent) < len(health_team):
-            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
-
-        prior_health_opponent = []
-        if prior_battle is not None:
-            prior_health_opponent = [
-                mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
-            ]
-
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
-        if len(prior_health_opponent) < len(health_team):
-            prior_health_opponent.extend(
-                [1.0] * (len(health_team) - len(prior_health_opponent))
-            )
-
-        diff_health_opponent = np.array(prior_health_opponent) - np.array(
-            health_opponent
-        )
-
-        # Reward for reducing the opponent's health
-        reward += np.sum(diff_health_opponent)
-
-        return reward
+        
+        return self.reward_computing_helper(battle, fainted_value=2, hp_value=1, victory_value=30)
 
     def _observation_size(self) -> int:
         """
@@ -140,45 +112,43 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 12
+        return 10
 
-    def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
-        """
-        Embeds the current state of a Pokémon battle into a numerical vector representation.
-        This method generates a feature vector that represents the current state of the battle,
-        this is used by the agent to make decisions.
+    def embed_battle(self, battle: AbstractBattle):
+        GEN_DATA = GenData.from_gen(9)
+        # -1 indicates that the move does not have a base power
+        # or is not available
+        moves_base_power = -np.ones(4)
+        moves_dmg_multiplier = np.ones(4)
 
-        You need to implement this method to define how the battle state is represented.
+        for i, move in enumerate(battle.available_moves):
+            battle.active_pokemon.stab_multiplier
+            moves_base_power[i] = (
+                move.base_power / 100
+            )  # Simple rescaling to facilitate learning
+            if move.type:
+                moves_dmg_multiplier[i] = move.type.damage_multiplier(
+                    battle.opponent_active_pokemon.type_1,
+                    battle.opponent_active_pokemon.type_2,
+                    type_chart=GEN_DATA.type_chart,
+                )
 
-        Args:
-            battle (AbstractBattle): The current battle instance containing information about
-                the player's team and the opponent's team.
-        Returns:
-            np.float32: A 1D numpy array containing the state you want the agent to observe.
-        """
-
-        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        health_opponent = [
-            mon.current_hp_fraction for mon in battle.opponent_team.values()
-        ]
-
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
-        if len(health_opponent) < len(health_team):
-            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
-
-        #########################################################################################################
-        # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
-        #########################################################################################################
-
-        # Final vector - single array with health of both teams
-        final_vector = np.concatenate(
-            [
-                health_team,  # N components for the health of each pokemon
-                health_opponent,  # N components for the health of opponent pokemon
-            ]
+        # We count how many pokemons have not fainted in each team
+        remaining_mon_team = (
+            len([mon for mon in battle.team.values() if mon.fainted]) / 6
+        )
+        remaining_mon_opponent = (
+            len([mon for mon in battle.opponent_team.values() if mon.fainted]) / 6
         )
 
-        return final_vector
+        # Final vector with 10 components
+        return np.concatenate(
+            [
+                moves_base_power,
+                moves_dmg_multiplier,
+                [remaining_mon_team, remaining_mon_opponent],
+            ]
+        )
 
 
 ########################################
