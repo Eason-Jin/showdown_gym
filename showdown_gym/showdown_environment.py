@@ -7,7 +7,6 @@ from poke_env import (
     AccountConfiguration,
     MaxBasePowerPlayer,
     RandomPlayer,
-    SimpleHeuristicsPlayer,
 )
 from poke_env.battle import AbstractBattle
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
@@ -22,7 +21,7 @@ from poke_env.battle.move_category import MoveCategory
 from poke_env.player.player import Player
 from poke_env.battle.side_condition import SideCondition
 from poke_env.player.battle_order import BattleOrder
-
+from expert_helper import SimpleHeuristicsPlayer
 
 class ShowdownEnvironment(BaseShowdownEnv):
 
@@ -41,7 +40,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
         )
 
         self.rl_agent = account_name_one
-        self.expert_player = SimpleHeuristicsPlayer(team=team)
+        self.expert_player = SimpleHeuristicsPlayer()
 
     def _get_action_size(self) -> int | None:
         """
@@ -51,7 +50,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         This should return the number of actions you wish to use if not using the default action scheme.
         """
-        return 10  # Return None if action size is default
+        # 5 switches + 4 moves
+        return 9  # Return None if action size is default
 
     def process_action(self, action: np.int64) -> np.int64:
         """
@@ -74,7 +74,13 @@ class ShowdownEnvironment(BaseShowdownEnv):
         :rtype: np.Int64
         """
         # Not considering Tera for now
-        return action
+        self.last_action = action # This has range [0,8]
+        if action >= 5:
+            # This is a move [5, 6, 7, 8] -> [6, 7, 8, 9]
+            return action + 1
+        else:
+            # This is a switch [0, 1, 2, 3, 4]
+            return action
 
     def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
         info = super().get_additional_info()
@@ -102,35 +108,13 @@ class ShowdownEnvironment(BaseShowdownEnv):
             float: The calculated reward based on the change in state of the battle.
         """
 
-        expert_action: BattleOrder = self.expert_player.choose_move(battle)
-
-        if isinstance(expert_action.order, Pokemon):
-            expert_action_id = 0
-            for i, mon in enumerate(battle.team.values()):
-                if mon == expert_action.order:
-                    expert_action_id = i
-                    break
-        elif isinstance(expert_action.order, Move):
-            if isinstance(expert_action.order, DynamaxMove):
-                expert_action_id = 9
-            else:
-                expert_action_id = 6
-            for i, move in enumerate(battle.available_moves):
-                if move == expert_action.order:
-                    expert_action_id += i
-                    # Convert Dynamax back to normal move index
-                    if expert_action_id > 9:
-                        expert_action_id -= 3
-                    break
-        else:
-            expert_action_id = -1
+        expert_action = self.expert_player.choose_move(battle)
 
         reward = 0.0
-        if 0 <= expert_action_id <= 5 and 0 <= self.last_action <= 5:
-            reward += 6
-        elif 6 <= expert_action_id <= 9 and 6 <= self.last_action <= 9:
-            reward += 4
-        reward -= abs(expert_action_id - self.last_action)
+        if  0 <= expert_action <= 4 and 0 <= self.last_action <= 4 or \
+            5 <= expert_action <= 8 and 5 <= self.last_action <= 8:
+            reward += 10.0
+        reward -= abs(expert_action - self.last_action)
 
         return reward
 
