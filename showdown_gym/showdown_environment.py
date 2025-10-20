@@ -272,7 +272,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
             rock_multiplier = mon.damage_multiplier(PokemonType.ROCK)
             damage += 0.125 * rock_multiplier
         # Spikes (up to 3 layers)
-        if SideCondition.SPIKES in side_conditions and not mon.is_airborne:
+        if SideCondition.SPIKES in side_conditions and PokemonType.FLYING not in mon.types and mon.item != "Air Balloon":
             layers = min(3, side_conditions[SideCondition.SPIKES])
             if layers == 1:
                 damage += 0.125
