@@ -193,20 +193,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
             return base_code + 100
         return base_code
 
-    def _encode_side_conditions(self, side_conditions: Dict[SideCondition, int], types: List[PokemonType]) -> int:
-        if not side_conditions:
-            return 0
-        side_condition_type = max(side_conditions, key=side_conditions.get)
-        duration = side_conditions[side_condition_type]
-        base_code = side_condition_type.value * 10 + duration
-        # If side condition affects the pokemon negatively, return a lower value
-        if (side_condition_type == SideCondition.STEALTH_ROCK and
-                any(t in [PokemonType.FIRE, PokemonType.ICE, PokemonType.FLYING, PokemonType.BUG] for t in types)) \
-            or (side_condition_type == SideCondition.TOXIC_SPIKES and
-                PokemonType.POISON not in types and PokemonType.STEEL not in types):
-            return base_code - 100
-        return base_code
-
     def _calc_stat(self, battle: AbstractBattle, mon: Pokemon, stat: str):
         boost = 1.0
         if mon.boosts[stat] > 1:
