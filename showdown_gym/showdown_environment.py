@@ -264,7 +264,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 23
+        return 21
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -294,19 +294,17 @@ class ShowdownEnvironment(BaseShowdownEnv):
         while len(move_damages) < 4:
             move_damages.append(0.0)
 
+        switches_info = []
+        for mon in battle.available_switches:
+            type_advantage = self._combat_effectiveness(mon, opponent)
+            health_frac = mon.current_hp_fraction
+            switches_info.extend([type_advantage, health_frac])
+        while len(switches_info) < 10:
+            switches_info.extend([0.0, 0.0])
+
         weather = self._encode_weather(battle.weather, active.types)
 
         side_conditions = self._encode_side_conditions(battle.side_conditions, active.types)
-
-        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        health_opponent = [
-            mon.current_hp_fraction for mon in battle.opponent_team.values()
-        ]
-
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
-        if len(health_opponent) < len(health_team):
-            health_opponent.extend(
-                [1.0] * (len(health_team) - len(health_opponent)))
 
         #########################################################################################################
         # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
@@ -321,10 +319,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 [opp_hp_frac],  # 1 component for the health fraction of the opponent active pokemon
                 [opp_status],  # 1 component for the status of the opponent active pokemon
                 move_damages,  # 4 components for the expected damage of each move
+                switches_info,  # 10 components for the switches info
                 [weather],  # 1 component for the weather
                 [side_conditions],  # 1 component for the side conditions
-                health_team,  # 6 components for the health of each pokemon
-                health_opponent,  # 6 components for the health of opponent pokemon
             ]
         )
 
