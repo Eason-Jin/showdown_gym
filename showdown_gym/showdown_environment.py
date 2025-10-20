@@ -7,6 +7,7 @@ from poke_env import (
     AccountConfiguration,
     MaxBasePowerPlayer,
     RandomPlayer,
+    SimpleHeuristicsPlayer,
 )
 from poke_env.battle import AbstractBattle
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
@@ -21,7 +22,7 @@ from poke_env.battle.move_category import MoveCategory
 from poke_env.player.player import Player
 from poke_env.battle.side_condition import SideCondition
 from poke_env.player.battle_order import BattleOrder
-from expert_helper import SimpleHeuristicsPlayer
+import random
 
 class ShowdownEnvironment(BaseShowdownEnv):
 
@@ -40,7 +41,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
         )
 
         self.rl_agent = account_name_one
-        self.expert_player = SimpleHeuristicsPlayer()
+        self.expert_player = ExpertPlayer()
 
     def _get_action_size(self) -> int | None:
         """
@@ -302,6 +303,166 @@ class ShowdownEnvironment(BaseShowdownEnv):
         )
 
         return final_vector
+    
+class ExpertPlayer():
+    ENTRY_HAZARDS = {
+        "spikes": SideCondition.SPIKES,
+        "stealhrock": SideCondition.STEALTH_ROCK,
+        "stickyweb": SideCondition.STICKY_WEB,
+        "toxicspikes": SideCondition.TOXIC_SPIKES,
+    }
+
+    ANTI_HAZARDS_MOVES = {"rapidspin", "defog"}
+
+    SPEED_TIER_COEFICIENT = 0.1
+    HP_FRACTION_COEFICIENT = 0.4
+    SWITCH_OUT_MATCHUP_THRESHOLD = -2
+
+    def _estimate_matchup(self, mon: Pokemon, opponent: Pokemon):
+        score = max([opponent.damage_multiplier(t) for t in mon.types if t is not None])
+        score -= max(
+            [mon.damage_multiplier(t) for t in opponent.types if t is not None]
+        )
+        if mon.base_stats["spe"] > opponent.base_stats["spe"]:
+            score += self.SPEED_TIER_COEFICIENT
+        elif opponent.base_stats["spe"] > mon.base_stats["spe"]:
+            score -= self.SPEED_TIER_COEFICIENT
+
+        score += mon.current_hp_fraction * self.HP_FRACTION_COEFICIENT
+        score -= opponent.current_hp_fraction * self.HP_FRACTION_COEFICIENT
+
+        return score
+
+    def _should_switch_out(self, battle: AbstractBattle):
+        active = battle.active_pokemon
+        opponent = battle.opponent_active_pokemon
+        # If there is a decent switch in...
+        if [
+            m
+            for m in battle.available_switches
+            if self._estimate_matchup(m, opponent) > 0
+        ]:
+            # ...and a 'good' reason to switch out
+            if active.boosts["def"] <= -3 or active.boosts["spd"] <= -3:
+                return True
+            if (
+                active.boosts["atk"] <= -3
+                and active.stats["atk"] >= active.stats["spa"]
+            ):
+                return True
+            if (
+                active.boosts["spa"] <= -3
+                and active.stats["atk"] <= active.stats["spa"]
+            ):
+                return True
+            if (
+                self._estimate_matchup(active, opponent)
+                < self.SWITCH_OUT_MATCHUP_THRESHOLD
+            ):
+                return True
+        return False
+
+    def _stat_estimation(self, mon: Pokemon, stat: str):
+        # Stats boosts value
+        if mon.boosts[stat] > 1:
+            boost = (2 + mon.boosts[stat]) / 2
+        else:
+            boost = 2 / (2 - mon.boosts[stat])
+        return ((2 * mon.base_stats[stat] + 31) + 5) * boost
+    
+    def choose_random_move(self):
+        return random.randint(0, 8)
+
+    def choose_move(self, battle: AbstractBattle) -> int:
+
+        # Main mons shortcuts
+        active = battle.active_pokemon
+        opponent = battle.opponent_active_pokemon
+
+        if active is None or opponent is None:
+            return self.choose_random_move()
+
+        # Rough estimation of damage ratio
+        physical_ratio = self._stat_estimation(active, "atk") / self._stat_estimation(
+            opponent, "def"
+        )
+        special_ratio = self._stat_estimation(active, "spa") / self._stat_estimation(
+            opponent, "spd"
+        )
+        moves: List[Move] = battle.available_moves
+        switches: List[Pokemon] = battle.available_switches
+
+        if moves and (
+            not self._should_switch_out(battle) or not switches
+        ):
+            n_remaining_mons = len(
+                [m for m in battle.team.values() if m.fainted is False]
+            )
+            n_opp_remaining_mons = 6 - len(
+                [m for m in battle.opponent_team.values() if m.fainted is True]
+            )
+
+            # Entry hazard...
+            for m_i in range(len(moves)):
+                move = moves[m_i]
+                # ...setup
+                if (
+                    n_opp_remaining_mons >= 3
+                    and move.id in self.ENTRY_HAZARDS
+                    and self.ENTRY_HAZARDS[move.id]
+                    not in battle.opponent_side_conditions
+                ):
+                    return m_i + 6
+
+                # ...removal
+                elif (
+                    battle.side_conditions
+                    and move.id in self.ANTI_HAZARDS_MOVES
+                    and n_remaining_mons >= 2
+                ):
+                    return m_i + 6
+
+            # Setup moves
+            if (
+                active.current_hp_fraction == 1
+                and self._estimate_matchup(active, opponent) > 0
+            ):
+                for m_i in range(len(moves)):
+                    move = moves[m_i]
+                    if (
+                        move.boosts
+                        and sum(move.boosts.values()) >= 2
+                        and move.target == "self"
+                        and min(
+                            [active.boosts[s] for s, v in move.boosts.items() if v > 0]
+                        )
+                        < 6
+                    ):
+                        return m_i + 6
+
+            move = moves.index(max(
+                moves,
+                key=lambda m: m.base_power
+                * (1.5 if m.type in active.types else 1)
+                * (
+                    physical_ratio
+                    if m.category == MoveCategory.PHYSICAL
+                    else special_ratio
+                )
+                * m.accuracy
+                * m.expected_hits
+                * opponent.damage_multiplier(m),
+            ))
+            return move + 6
+
+        if switches:
+            switch = switches.index(max(
+                    switches,
+                    key=lambda s: self._estimate_matchup(s, opponent),
+                ))
+            return switch
+
+        return self.choose_random_move()
 
 
 ########################################
