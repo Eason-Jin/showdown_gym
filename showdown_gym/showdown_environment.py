@@ -260,6 +260,30 @@ class ShowdownEnvironment(BaseShowdownEnv):
         estimated_damage = base_power * (1.5 if move.type in attacker.types else 1) * (physical_ratio if move.category ==
                                                                                        MoveCategory.PHYSICAL else special_ratio) * accuracy * move.expected_hits * defender.damage_multiplier(move)
         return estimated_damage
+    
+    def _estimate_hazard_damage(self, mon: Pokemon, side_conditions: Dict[SideCondition, int]) -> float:
+        """
+        Estimate the fraction of HP lost by this Pokémon if it is switched in, due to hazards.
+        """
+        damage = 0.0
+        # Stealth Rock
+        if SideCondition.STEALTH_ROCK in side_conditions:
+            # Stealth Rock damage is 1/8 * type effectiveness to Rock
+            rock_multiplier = mon.damage_multiplier(PokemonType.ROCK)
+            damage += 0.125 * rock_multiplier
+        # Spikes (up to 3 layers)
+        if SideCondition.SPIKES in side_conditions and not mon.is_airborne:
+            layers = min(3, side_conditions[SideCondition.SPIKES])
+            if layers == 1:
+                damage += 0.125
+            elif layers == 2:
+                damage += 0.1667
+            elif layers == 3:
+                damage += 0.25
+        # Toxic Spikes (if not airborne or Steel/Poison type)
+        # Not direct damage, so not included here
+        # Sticky Web, etc. are not direct damage
+        return damage
 
     def _observation_size(self) -> int:
         """
@@ -274,7 +298,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 21
+        return 26
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -308,13 +332,13 @@ class ShowdownEnvironment(BaseShowdownEnv):
         for mon in battle.available_switches:
             type_advantage = self._combat_effectiveness(mon, opponent)
             health_frac = mon.current_hp_fraction
-            switches_info.extend([type_advantage, health_frac])
-        while len(switches_info) < 10:
-            switches_info.extend([0.0, 0.0])
+            # Calculate hazard damage for this mon if switched in
+            hazard_damage = self._estimate_hazard_damage(mon, battle.side_conditions)
+            switches_info.extend([type_advantage, health_frac, hazard_damage])
+        while len(switches_info) < 15:
+            switches_info.extend([0.0, 0.0, 0.0])
 
         weather = self._encode_weather(battle.weather, active.types)
-
-        side_conditions = self._encode_side_conditions(battle.side_conditions, active.types)
 
         can_tera = 1.0 if battle.can_tera else 0.0
 
@@ -331,9 +355,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 [opp_hp_frac],  # 1 component for the health fraction of the opponent active pokemon
                 [opp_status],  # 1 component for the status of the opponent active pokemon
                 move_damages,  # 4 components for the expected damage of each move
-                switches_info,  # 10 components for the switches info
+                switches_info,  # 15 components for the switches info (type_adv, hp, hazard) for up to 5 switches
                 [weather],  # 1 component for the weather
-                [side_conditions],  # 1 component for the side conditions
                 [can_tera],  # 1 component for whether can tera
             ]
         )
