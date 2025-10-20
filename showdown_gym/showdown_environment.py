@@ -114,13 +114,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
         active = battle.active_pokemon
         opponent = battle.opponent_active_pokemon
 
-        if battle.finished:
-            if battle.won == "me":
-                return 100.0
-            else:
-                return -100.0
-
         score = 0.0
+
         # HP
         score += sum(mon.current_hp_fraction for mon in battle.team.values())
         score -= sum(mon.current_hp_fraction for mon in battle.opponent_team.values())
@@ -157,6 +152,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
             if best_effectiveness > 1.0:
                 score += 0.3 * (best_effectiveness - 1.0)
 
+        if battle.won:
+            score += 30.0
+        elif battle.lost:
+            score -= 30.0
+            
         return score
 
     def _combat_effectiveness(self, active: Pokemon, opponent: Pokemon):
