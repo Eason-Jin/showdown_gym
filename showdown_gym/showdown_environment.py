@@ -51,8 +51,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         This should return the number of actions you wish to use if not using the default action scheme.
         """
-        # 5 switches + 4 moves
-        return 9  # Return None if action size is default
+
+        return 5 + 4
 
     def process_action(self, action: np.int64) -> np.int64:
         """
@@ -74,14 +74,15 @@ class ShowdownEnvironment(BaseShowdownEnv):
         :return: The battle order ID for the given action in context of the current battle.
         :rtype: np.Int64
         """
-        # Not considering Tera for now
-        self.last_action = action # This has range [0,8]
-        if action >= 5:
-            # This is a move [5, 6, 7, 8] -> [6, 7, 8, 9]
-            return action + 1
-        else:
-            # This is a switch [0, 1, 2, 3, 4]
-            return action
+        if 0 <= action <= 4:
+            # Switches [0, 4] map to [0, 4]
+            action = action
+        elif 5 <= action <= 8:
+            # Moves [5, 8] map to [6, 9]
+            action = action + 1
+        self.last_action = action
+        return action
+        
 
     def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
         info = super().get_additional_info()
@@ -153,20 +154,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
             return base_code + 100
         return base_code
 
-    def _encode_side_conditions(self, side_conditions: Dict[SideCondition, int], types: List[PokemonType]) -> int:
-        if not side_conditions:
-            return 0
-        side_condition_type = max(side_conditions, key=side_conditions.get)
-        duration = side_conditions[side_condition_type]
-        base_code = side_condition_type.value * 10 + duration
-        # If side condition affects the pokemon negatively, return a lower value
-        if (side_condition_type == SideCondition.STEALTH_ROCK and
-                any(t in [PokemonType.FIRE, PokemonType.ICE, PokemonType.FLYING, PokemonType.BUG] for t in types)) \
-            or (side_condition_type == SideCondition.TOXIC_SPIKES and
-                PokemonType.POISON not in types and PokemonType.STEEL not in types):
-            return base_code - 100
-        return base_code
-
     def _calc_stat(self, battle: AbstractBattle, mon: Pokemon, stat: str):
         boost = 1.0
         if mon.boosts[stat] > 1:
@@ -220,6 +207,30 @@ class ShowdownEnvironment(BaseShowdownEnv):
         estimated_damage = base_power * (1.5 if move.type in attacker.types else 1) * (physical_ratio if move.category ==
                                                                                        MoveCategory.PHYSICAL else special_ratio) * accuracy * move.expected_hits * defender.damage_multiplier(move)
         return estimated_damage
+    
+    def _estimate_hazard_damage(self, mon: Pokemon, side_conditions: Dict[SideCondition, int]) -> float:
+        """
+        Estimate the fraction of HP lost by this Pokémon if it is switched in, due to hazards.
+        """
+        damage = 0.0
+        # Stealth Rock
+        if SideCondition.STEALTH_ROCK in side_conditions:
+            # Stealth Rock damage is 1/8 * type effectiveness to Rock
+            rock_multiplier = mon.damage_multiplier(PokemonType.ROCK)
+            damage += 0.125 * rock_multiplier
+        # Spikes (up to 3 layers)
+        if SideCondition.SPIKES in side_conditions and PokemonType.FLYING not in mon.types and mon.item != "Air Balloon":
+            layers = min(3, side_conditions[SideCondition.SPIKES])
+            if layers == 1:
+                damage += 0.125
+            elif layers == 2:
+                damage += 0.1667
+            elif layers == 3:
+                damage += 0.25
+        # Toxic Spikes (if not airborne or Steel/Poison type)
+        # Not direct damage, so not included here
+        # Sticky Web, etc. are not direct damage
+        return damage
 
     def _observation_size(self) -> int:
         """
@@ -234,8 +245,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 23
-
+        return 26
+    
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
         Embeds the current state of a Pokémon battle into a numerical vector representation.
@@ -264,20 +275,19 @@ class ShowdownEnvironment(BaseShowdownEnv):
         while len(move_damages) < 4:
             move_damages.append(0.0)
 
+        switches_info = []
+        for mon in battle.available_switches:
+            type_advantage = self._combat_effectiveness(mon, opponent)
+            health_frac = mon.current_hp_fraction
+            # Calculate hazard damage for this mon if switched in
+            hazard_damage = self._estimate_hazard_damage(mon, battle.side_conditions)
+            switches_info.extend([type_advantage, health_frac, hazard_damage])
+        while len(switches_info) < 15:
+            switches_info.extend([0.0, 0.0, 0.0])
+
         weather = self._encode_weather(battle.weather, active.types)
 
-        side_conditions = self._encode_side_conditions(
-            battle.side_conditions, active.types)
-
-        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        health_opponent = [
-            mon.current_hp_fraction for mon in battle.opponent_team.values()
-        ]
-
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
-        if len(health_opponent) < len(health_team):
-            health_opponent.extend(
-                [1.0] * (len(health_team) - len(health_opponent)))
+        can_tera = 1.0 if battle.can_tera else 0.0
 
         #########################################################################################################
         # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
@@ -287,22 +297,17 @@ class ShowdownEnvironment(BaseShowdownEnv):
         final_vector = np.concatenate(
             [
                 [combat_effectiveness],  # 1 component for combat effectiveness
-                # 1 component for the health fraction of the active pokemon
-                [my_hp_frac],
+                [my_hp_frac],  # 1 component for the health fraction of the active pokemon
                 [my_status],  # 1 component for the status of the active pokemon
-                # 1 component for the health fraction of the opponent active pokemon
-                [opp_hp_frac],
-                # 1 component for the status of the opponent active pokemon
-                [opp_status],
+                [opp_hp_frac],  # 1 component for the health fraction of the opponent active pokemon
+                [opp_status],  # 1 component for the status of the opponent active pokemon
                 move_damages,  # 4 components for the expected damage of each move
+                switches_info,  # 15 components for the switches info (type_adv, hp, hazard) for up to 5 switches
                 [weather],  # 1 component for the weather
-                [side_conditions],  # 1 component for the side conditions
-                health_team,  # 6 components for the health of each pokemon
-                health_opponent,  # 6 components for the health of opponent pokemon
+                [can_tera],  # 1 component for whether can tera
             ]
         )
 
-        return final_vector
     
 class ExpertPlayer():
     ENTRY_HAZARDS = {
