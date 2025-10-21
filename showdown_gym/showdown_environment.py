@@ -307,6 +307,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 [can_tera],  # 1 component for whether can tera
             ]
         )
+        
+        return final_vector
 
     
 class ExpertPlayer():
