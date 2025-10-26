@@ -42,6 +42,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         self.rl_agent = account_name_one
         self.expert_player = ExpertPlayer()
+        # Create a csv file at ~/pokemon
+        with open(os.path.expanduser("~/cares_rl_logs/actions.csv"), "w") as f:
+            f.write("expert_action, rl_action\n")
 
     def _get_action_size(self) -> int | None:
         """
@@ -118,6 +121,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
             reward += 10.0
         reward -= abs(expert_action - self.last_action)
 
+        with open (os.path.expanduser("~/cares_rl_logs/actions.csv"), "a") as f:
+            f.write(f"{expert_action}, {self.last_action}\n")
         return reward
 
     def _combat_effectiveness(self, active: Pokemon, opponent: Pokemon):
